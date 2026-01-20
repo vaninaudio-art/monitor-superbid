@@ -26,7 +26,7 @@ class SupabaseSuperbidMonitor:
     
     def __init__(self):
         self.url = os.getenv('SUPABASE_URL')
-        self.key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
+        self.key = os.getenv('SUPABASE_KEY')
         
         if not self.url or not self.key:
             raise ValueError("❌ Configure SUPABASE_URL e SUPABASE_KEY")
