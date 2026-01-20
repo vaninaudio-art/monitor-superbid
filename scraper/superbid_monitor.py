@@ -3,7 +3,7 @@
 """
 SUPERBID MONITOR - Monitoramento Temporal para ML
 ✅ Busca itens ativos da base
-✅ Atualiza dados via API
+✅ Atualiza dados via API (IGUAL AO SCRAPER)
 ✅ Calcula features temporais e mudanças
 ✅ Cria snapshots históricos em superbid_monitoring
 ✅ Atualiza superbid_items
@@ -46,7 +46,7 @@ class SupabaseSuperbidMonitor:
         self.session = requests.Session()
         self.session.headers.update(self.headers)
     
-    def get_active_items(self, limit: int = 500) -> List[Dict]:
+    def get_active_items(self, limit: int = 1000) -> List[Dict]:
         """
         Busca itens ativos para monitorar
         Critérios:
@@ -56,10 +56,7 @@ class SupabaseSuperbidMonitor:
         """
         print(f"📊 Buscando itens ativos (limit={limit})...")
         
-        # Data/hora atual
         now = datetime.utcnow().isoformat()
-        
-        # Query com filtros
         url = f"{self.url}/rest/v1/{self.table_items}"
         
         params = {
@@ -67,7 +64,7 @@ class SupabaseSuperbidMonitor:
             'is_active': 'eq.true',
             'is_closed': 'eq.false',
             'auction_end_date': f'gt.{now}',
-            'order': 'auction_end_date.asc',  # Prioriza os que vão acabar primeiro
+            'order': 'auction_end_date.asc',
             'limit': limit,
         }
         
@@ -88,12 +85,37 @@ class SupabaseSuperbidMonitor:
             print(f"❌ Erro ao buscar itens: {str(e)}")
             return []
     
+    def count_snapshots(self, item_id: int) -> int:
+        """Conta quantos snapshots já existem para um item"""
+        url = f"{self.url}/rest/v1/{self.table_monitoring}"
+        
+        try:
+            params = {
+                'item_id': f'eq.{item_id}',
+                'select': 'id',
+            }
+            
+            headers = self.headers.copy()
+            headers['Prefer'] = 'count=exact'
+            
+            response = self.session.get(url, params=params, headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                # Supabase retorna o count no header Content-Range
+                content_range = response.headers.get('Content-Range', '0-0/0')
+                total = int(content_range.split('/')[-1])
+                return total
+            else:
+                return 0
+                
+        except Exception as e:
+            return 0
+    
     def insert_snapshot(self, snapshot: Dict) -> bool:
         """Insere snapshot na tabela de monitoramento"""
         url = f"{self.url}/rest/v1/{self.table_monitoring}"
         
         try:
-            # Headers específicos para insert
             headers = self.headers.copy()
             headers['Prefer'] = 'return=minimal'
             
@@ -122,8 +144,6 @@ class SupabaseSuperbidMonitor:
         
         try:
             params = {'id': f'eq.{item_id}'}
-            
-            # Headers específicos para update
             headers = self.headers.copy()
             headers['Prefer'] = 'return=minimal'
             
@@ -161,7 +181,8 @@ class SuperbidMonitor:
     
     def __init__(self):
         self.source = 'superbid'
-        self.api_url = 'https://offer-query.superbid.net/offer/'
+        self.api_url = 'https://offer-query.superbid.net/seo/offers/'
+        self.site_url = 'https://exchange.superbid.net'
         
         self.stats = {
             'total_monitored': 0,
@@ -170,6 +191,7 @@ class SuperbidMonitor:
             'status_changes': 0,
             'errors': 0,
             'snapshots_created': 0,
+            'api_not_found': 0,
         }
         
         self.headers = {
@@ -183,7 +205,6 @@ class SuperbidMonitor:
         self.session = requests.Session()
         self.session.headers.update(self.headers)
         
-        # Cliente Supabase para monitoring
         self.client = SupabaseSuperbidMonitor()
     
     def run(self):
@@ -196,43 +217,55 @@ class SuperbidMonitor:
         
         start_time = time.time()
         
-        # ========================================
-        # ETAPA 1: BUSCAR ITENS ATIVOS
-        # ========================================
-        print("📊 Buscando itens ativos para monitorar...")
+        # ETAPA 1: BUSCAR ITENS ATIVOS DO BANCO
         active_items = self.client.get_active_items()
         
         if not active_items:
             print("⚠️  Nenhum item ativo encontrado")
             return 0
         
-        print(f"✅ {len(active_items)} itens ativos encontrados")
+        print(f"✅ {len(active_items)} itens no banco")
+        
+        # Criar índice offer_id -> item
+        items_by_offer_id = {item['offer_id']: item for item in active_items}
+        
+        print(f"🎯 Monitorando {len(items_by_offer_id)} offer_ids")
         print("="*80 + "\n")
         
-        # ========================================
-        # ETAPA 2: PROCESSAR CADA ITEM
-        # ========================================
-        for idx, item in enumerate(active_items, 1):
-            print(f"[{idx}/{len(active_items)}] 📦 {item.get('title', 'Sem título')[:60]}")
+        # ETAPA 2: BUSCAR TODAS AS OFERTAS DA API
+        print("📡 Buscando ofertas da API Superbid...")
+        api_offers = self._fetch_all_offers()
+        
+        if not api_offers:
+            print("⚠️  Nenhuma oferta retornada da API")
+            return 0
+        
+        print(f"✅ {len(api_offers)} ofertas da API")
+        print("="*80 + "\n")
+        
+        # ETAPA 3: PROCESSAR MATCH
+        processed = 0
+        for offer_id, old_item in items_by_offer_id.items():
+            new_data = api_offers.get(offer_id)
+            
+            if not new_data:
+                self.stats['api_not_found'] += 1
+                continue
+            
+            processed += 1
+            print(f"[{processed}/{len(items_by_offer_id)}] 📦 {old_item.get('title', 'Sem título')[:60]}")
             print(f"{'─'*80}")
             
             try:
-                self._process_item(item)
+                self._process_item(old_item, new_data)
                 self.stats['total_monitored'] += 1
-                
             except Exception as e:
                 self.stats['errors'] += 1
                 print(f"   ❌ Erro: {str(e)[:100]}")
             
-            # Rate limiting
-            if idx < len(active_items):
-                time.sleep(1.5)
-            
             print()
         
-        # ========================================
-        # ETAPA 3: ESTATÍSTICAS
-        # ========================================
+        # ESTATÍSTICAS
         self._print_stats()
         
         elapsed = time.time() - start_time
@@ -245,38 +278,87 @@ class SuperbidMonitor:
         
         return 0
     
-    def _process_item(self, old_item: Dict):
-        """Processa um item: busca dados atuais, calcula features, cria snapshot"""
-        offer_id = old_item.get('offer_id')
-        if not offer_id:
-            return
+    def _fetch_all_offers(self) -> Dict[int, Dict]:
+        """Busca TODAS as ofertas - IGUAL AO SCRAPER"""
+        all_offers = {}
+        page_num = 1
+        page_size = 100
         
-        # ========================================
-        # 1. BUSCAR DADOS ATUALIZADOS DA API
-        # ========================================
-        new_data = self._fetch_offer(offer_id)
-        if not new_data:
-            print(f"   ⚠️  Não foi possível atualizar dados")
-            return
+        while True:
+            try:
+                params = {
+                    "urlSeo": f"{self.site_url}/",
+                    "locale": "pt_BR",
+                    "orderBy": "score:desc",
+                    "pageNumber": page_num,
+                    "pageSize": page_size,
+                    "portalId": "[2,15]",
+                    "requestOrigin": "marketplace",
+                    "searchType": "openedAll",
+                    "timeZoneId": "America/Sao_Paulo",
+                }
+                
+                response = self.session.get(
+                    self.api_url,
+                    params=params,
+                    timeout=30
+                )
+                
+                if response.status_code != 200:
+                    print(f"   ⚠️  HTTP {response.status_code} na página {page_num}")
+                    break
+                
+                data = response.json()
+                offers = data.get('offers', [])
+                total_offers = data.get('total', 0)
+                
+                if not offers:
+                    break
+                
+                print(f"   📄 Página {page_num}: {len(offers)} ofertas (total: {total_offers})")
+                
+                # Indexa por offer_id
+                for offer in offers:
+                    offer_id = offer.get('id')
+                    if offer_id:
+                        all_offers[offer_id] = offer
+                
+                # IGUAL AO SCRAPER: verifica se acabou
+                start = data.get('start', 0)
+                limit = data.get('limit', page_size)
+                if start + limit >= total_offers:
+                    break
+                
+                page_num += 1
+                time.sleep(1)
+                
+            except Exception as e:
+                print(f"   ⚠️  Erro na página {page_num}: {str(e)[:80]}")
+                break
         
-        # ========================================
-        # 2. CALCULAR FEATURES TEMPORAIS
-        # ========================================
+        return all_offers
+    
+    def _process_item(self, old_item: Dict, new_data: Dict):
+        """Processa um item: calcula features, cria snapshot, atualiza base"""
+        
+        # CONTA SNAPSHOTS EXISTENTES (para ML)
+        total_snapshots = self.client.count_snapshots(old_item['id'])
+        
+        # CALCULA FEATURES
         snapshot = self._calculate_features(old_item, new_data)
         
-        # ========================================
-        # 3. CRIAR SNAPSHOT NA TABELA MONITORING
-        # ========================================
+        # ATUALIZA CONTADOR DE SNAPSHOTS (será o próximo)
+        snapshot['total_snapshots_count'] = total_snapshots + 1
+        
+        # SEMPRE CRIA SNAPSHOT (histórico temporal)
         try:
             self.client.insert_snapshot(snapshot)
             self.stats['snapshots_created'] += 1
-            print(f"   ✅ Snapshot criado")
+            print(f"   ✅ Snapshot #{total_snapshots + 1} criado")
         except Exception as e:
             print(f"   ⚠️  Erro ao criar snapshot: {str(e)[:80]}")
         
-        # ========================================
-        # 4. ATUALIZAR ITEM NA TABELA BASE
-        # ========================================
+        # SÓ ATUALIZA BASE QUANDO TEM MUDANÇA
         if snapshot.get('bid_status_changed') or snapshot.get('status_changed'):
             try:
                 update_data = self._prepare_update(new_data)
@@ -292,42 +374,11 @@ class SuperbidMonitor:
             except Exception as e:
                 print(f"   ⚠️  Erro ao atualizar base: {str(e)[:80]}")
     
-    def _fetch_offer(self, offer_id: int) -> Optional[Dict]:
-        """Busca dados atualizados de uma oferta na API"""
-        try:
-            params = {
-                "locale": "pt_BR",
-                "offerId": offer_id,
-                "portalId": "[2,15]",
-                "requestOrigin": "marketplace",
-                "timeZoneId": "America/Sao_Paulo",
-            }
-            
-            response = self.session.get(
-                self.api_url,
-                params=params,
-                timeout=15
-            )
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                print(f"   ⚠️  HTTP {response.status_code}")
-                return None
-                
-        except Exception as e:
-            print(f"   ⚠️  Erro na API: {str(e)[:60]}")
-            return None
-    
     def _calculate_features(self, old_item: Dict, new_data: Dict) -> Dict:
         """Calcula features temporais e detecta mudanças"""
         now = datetime.now(timezone.utc)
         
-        # ========================================
-        # HELPERS
-        # ========================================
         def get(path: str, default=None):
-            """Extrai valor usando dot notation"""
             keys = path.split('.')
             value = new_data
             for key in keys:
@@ -371,22 +422,15 @@ class SuperbidMonitor:
             except:
                 return None
         
-        # ========================================
-        # EXTRAÇÃO DE DADOS NOVOS
-        # ========================================
-        
-        # IDs
+        # EXTRAÇÃO
         item_id = old_item['id']
         external_id = old_item['external_id']
-        offer_id = safe_int(get('id'))
         
-        # Lances e atividade
         total_bids = safe_int(get('totalBids')) or 0
         total_bidders = safe_int(get('totalBidders')) or 0
         visits = safe_int(get('visits')) or 0
         has_bids = safe_bool(get('hasBids'))
         
-        # Valores
         price = safe_float(get('price'))
         initial_bid_value = safe_float(get('initialBidValue'))
         current_min_bid = safe_float(get('currentMinBid'))
@@ -394,59 +438,46 @@ class SuperbidMonitor:
         reserved_price = safe_float(get('reservedPrice'))
         bid_increment = safe_float(get('bidIncrement'))
         
-        # Vencedor
         current_winner_id = safe_int(get('currentWinner.id'))
         current_winner_login = get('currentWinner.login')
         
-        # Status
         is_sold = safe_bool(get('isSold'))
         is_reserved = safe_bool(get('isReserved'))
         is_closed = safe_bool(get('isClosed'))
         is_removed = safe_bool(get('isRemoved'))
         is_highlight = safe_bool(get('isHighlight'))
         
-        # Datas
         auction_begin_date = safe_datetime(get('auction.beginDate'))
         auction_end_date = safe_datetime(get('auction.endDate'))
         auction_max_enddate = safe_datetime(get('auction.maxEnddateOffer'))
         
-        # Categoria
         category = get('product.subCategory.category.description')
         product_type_desc = get('product.productType.description')
         sub_category_desc = get('product.subCategory.description')
         
-        # Localização
         city = get('product.location.city')
         state = get('product.location.state')
         location_lat = safe_float(get('product.location.locationGeo.lat'))
         location_lon = safe_float(get('product.location.locationGeo.lon'))
         
-        # Vendedor
         seller_id = safe_int(get('seller.id'))
         seller_name = get('seller.name')
         store_id = safe_int(get('store.id'))
         store_name = get('store.name')
         manager_name = get('manager.name')
         
-        # Mídia
         photo_count = safe_int(get('product.photoCount')) or 0
         video_url_count = safe_int(get('product.videoUrlCount')) or 0
         
-        # Textos para NLP
         title = get('product.shortDesc', 'Sem Título')
         description = get('product.detailedDescription')
         
-        # ========================================
-        # CÁLCULO DE FEATURES TEMPORAIS
-        # ========================================
-        
-        # Tempo até fim do leilão
+        # TEMPORAIS
         hours_until_auction_end = None
         if auction_end_date:
             delta = (auction_end_date - now).total_seconds() / 3600
             hours_until_auction_end = round(delta, 2)
         
-        # Tempo desde início do leilão
         hours_since_auction_start = None
         days_in_auction = None
         if auction_begin_date:
@@ -454,22 +485,16 @@ class SuperbidMonitor:
             hours_since_auction_start = round(delta, 2)
             days_in_auction = round(delta / 24, 2)
         
-        # ========================================
-        # CÁLCULO DE INCREMENTOS E VELOCIDADES
-        # ========================================
-        
-        # Incrementos de lances
+        # INCREMENTOS
         old_total_bids = old_item.get('total_bids', 0) or 0
         bid_count_change = total_bids - old_total_bids
         
         old_total_bidders = old_item.get('total_bidders', 0) or 0
         bidder_count_change = total_bidders - old_total_bidders
         
-        # Incremento de visitas
         old_visits = old_item.get('visits', 0) or 0
         visit_increment = visits - old_visits
         
-        # Tempo desde último snapshot
         old_last_scraped = old_item.get('last_scraped_at')
         hours_since_last_snapshot = None
         if old_last_scraped:
@@ -480,7 +505,7 @@ class SuperbidMonitor:
             except:
                 pass
         
-        # Velocidades (por hora)
+        # VELOCIDADES
         bid_velocity = None
         visit_velocity = None
         popularity_velocity = None
@@ -493,7 +518,6 @@ class SuperbidMonitor:
                 visit_velocity = round(visit_increment / hours_since_last_snapshot, 4)
                 popularity_velocity = visit_velocity
         
-        # Incremento total de valor
         bid_total_increment = None
         bid_total_increment_percentage = None
         if current_max_bid and initial_bid_value and initial_bid_value > 0:
@@ -502,22 +526,16 @@ class SuperbidMonitor:
                 (bid_total_increment / initial_bid_value) * 100, 2
             )
         
-        # Incremento percentual do lance
         bid_increment_percentage = None
         if bid_increment and initial_bid_value and initial_bid_value > 0:
             bid_increment_percentage = round(
                 (bid_increment / initial_bid_value) * 100, 2
             )
         
-        # ========================================
-        # DETECÇÃO DE MUDANÇAS
-        # ========================================
-        
-        # Mudança de status de lance
+        # MUDANÇAS
         old_has_bids = old_item.get('has_bids', False) or False
         bid_status_changed = (has_bids != old_has_bids)
         
-        # Mudança de status geral
         old_is_closed = old_item.get('is_closed', False) or False
         old_is_sold = old_item.get('is_sold', False) or False
         status_changed = (
@@ -525,41 +543,28 @@ class SuperbidMonitor:
             (is_sold != old_is_sold)
         )
         
-        # Mudança de vencedor
         old_winner_id = old_item.get('current_winner_id')
         winner_changed = (current_winner_id != old_winner_id) and current_winner_id is not None
         
-        # Tempo com lance
         time_with_bid_hours = None
         if has_bids and hours_since_auction_start:
             time_with_bid_hours = hours_since_auction_start
         
-        # ========================================
-        # COMISSÃO E PAGAMENTO
-        # ========================================
         commission_percent = safe_float(get('groupOffer.commissionPercent'))
         allows_credit_card = safe_bool(get('commercialCondition.allowsCreditCard'))
         transaction_limit = safe_float(get('commercialCondition.transactionLimit'))
         max_installments = safe_int(get('commercialCondition.maxInstallments'))
         
-        # ========================================
-        # RETORNO DO SNAPSHOT
-        # ========================================
         return {
-            # IDs
             'item_id': item_id,
             'external_id': external_id,
             'snapshot_at': now.isoformat(),
-            
-            # Temporal
             'hours_until_auction_end': hours_until_auction_end,
             'hours_since_auction_start': hours_since_auction_start,
             'days_in_auction': days_in_auction,
             'auction_begin_date': auction_begin_date.isoformat() if auction_begin_date else None,
             'auction_end_date': auction_end_date.isoformat() if auction_end_date else None,
             'auction_max_enddate': auction_max_enddate.isoformat() if auction_max_enddate else None,
-            
-            # Valores
             'price': price,
             'initial_bid_value': initial_bid_value,
             'current_min_bid': current_min_bid,
@@ -569,24 +574,16 @@ class SuperbidMonitor:
             'bid_total_increment': bid_total_increment,
             'bid_total_increment_percentage': bid_total_increment_percentage,
             'bid_increment_percentage': bid_increment_percentage,
-            
-            # Atividade
             'total_bids': total_bids,
             'total_bidders': total_bidders,
             'total_received_proposals': safe_int(get('totalReceivedProposals')) or 0,
             'visits': visits,
-            
-            # Incrementos
             'bid_count_change': bid_count_change,
             'bidder_count_change': bidder_count_change,
             'visit_increment': visit_increment,
-            
-            # Velocidades
             'visit_velocity': visit_velocity,
             'bid_velocity': bid_velocity,
             'popularity_velocity': popularity_velocity,
-            
-            # Estados
             'has_bids': has_bids,
             'has_received_bids_or_proposals': safe_bool(get('hasReceivedBidsOrProposals')),
             'is_sold': is_sold,
@@ -595,57 +592,37 @@ class SuperbidMonitor:
             'is_removed': is_removed,
             'is_highlight': is_highlight,
             'is_active': not is_closed and not is_sold,
-            
-            # Mudanças
             'bid_status_changed': bid_status_changed,
             'status_changed': status_changed,
             'offer_status_changed': status_changed,
             'winner_changed': winner_changed,
             'time_with_bid_hours': time_with_bid_hours,
-            
-            # Vencedor
             'current_winner_id': current_winner_id,
             'current_winner_login': current_winner_login,
-            
-            # Categoria
             'category': category,
             'product_type_desc': product_type_desc,
             'sub_category_desc': sub_category_desc,
             'auction_modality': get('auction.modalityDesc'),
             'offer_type_id': safe_int(get('offerTypeId')),
-            
-            # Localização
             'city': city,
             'state': state,
             'location_lat': location_lat,
             'location_lon': location_lon,
-            
-            # Vendedor
             'seller_id': seller_id,
             'seller_name': seller_name,
             'store_id': store_id,
             'store_name': store_name,
             'manager_name': manager_name,
-            
-            # Mídia
             'photo_count': photo_count,
             'video_url_count': video_url_count,
-            
-            # NLP
             'title': title,
             'description': description,
-            
-            # Pagamento
             'commission_percent': commission_percent,
             'allows_credit_card': allows_credit_card,
             'transaction_limit': transaction_limit,
             'max_installments': max_installments,
-            
-            # Rastreamento
             'hours_since_last_snapshot': hours_since_last_snapshot,
-            'total_snapshots_count': 1,  # Será incrementado no banco
-            
-            # Metadata
+            # total_snapshots_count será setado em _process_item após contar
             'source': 'superbid',
             'metadata': {},
         }
@@ -712,6 +689,7 @@ class SuperbidMonitor:
         print(f"   • Itens atualizados: {self.stats['updated']}")
         print(f"   • Novos lances: {self.stats['new_bids']}")
         print(f"   • Mudanças de status: {self.stats['status_changes']}")
+        print(f"   • Não encontrados na API: {self.stats['api_not_found']}")
         print(f"   • Erros: {self.stats['errors']}")
         print("="*80)
 
