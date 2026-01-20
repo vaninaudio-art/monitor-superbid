@@ -418,7 +418,11 @@ class SuperbidMonitor:
                 return None
             try:
                 dt_str = str(val).replace('Z', '+00:00')
-                return datetime.fromisoformat(dt_str)
+                dt = datetime.fromisoformat(dt_str)
+                # Garante que é timezone-aware
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
             except:
                 return None
         
