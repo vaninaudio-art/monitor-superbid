@@ -29,7 +29,7 @@ class SupabaseSuperbidMonitor:
         self.key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
         
         if not self.url or not self.key:
-            raise ValueError("❌ Configure SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY")
+            raise ValueError("❌ Configure SUPABASE_URL e SUPABASE_KEY")
         
         self.url = self.url.rstrip('/')
         self.table_items = 'superbid_items'
