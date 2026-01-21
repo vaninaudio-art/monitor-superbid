@@ -367,6 +367,10 @@ class SuperbidMonitor:
     
     def _process_matches(self, api_offers: Dict[int, Dict]):
         """Processa matches"""
+        print(f"\n🔄 Processando matches...")
+        print(f"   Total no banco: {len(self.db_items_by_offer_id)}")
+        print(f"   Total da API: {len(api_offers)}")
+        
         snapshots = []
         updates = []
         batch_size = 50
@@ -374,21 +378,26 @@ class SuperbidMonitor:
         total = len(self.db_items_by_offer_id)
         processed = 0
         
+        print(f"\n⏳ Iniciando loop de processamento...\n")
+        
         for offer_id, db_item in self.db_items_by_offer_id.items():
             processed += 1
+            
+            # Progress SEMPRE a cada 50
+            if processed % 50 == 0:
+                print(f"   [{processed}/{total}] 🔄 Processando... (matched: {self.stats['items_matched']}, snapshots: {len(snapshots)})")
             
             api_data = api_offers.get(offer_id)
             
             if not api_data:
                 self.stats['items_not_matched'] += 1
-                if processed % 100 == 0:
-                    print(f"   [{processed}/{total}] ❌ {offer_id} não encontrado na API")
                 continue
             
             self.stats['items_matched'] += 1
             
-            # Conta snapshots
-            total_snaps = self.client.count_snapshots(db_item['id'])
+            # ⚠️ REMOVIDO: count_snapshots (tá travando aqui!)
+            # total_snaps = self.client.count_snapshots(db_item['id'])
+            total_snaps = 0  # Usa zero por enquanto
             
             # Cria snapshot
             snapshot = self._create_snapshot(db_item, api_data, total_snaps)
@@ -405,18 +414,16 @@ class SuperbidMonitor:
             if update:
                 updates.append(update)
             
-            # Progress
-            if processed % 100 == 0:
-                print(f"   [{processed}/{total}] ✅ Processados")
-            
             # Flush em lotes
             if len(snapshots) >= batch_size:
+                print(f"   💾 Flush: {len(snapshots)} snapshots, {len(updates)} updates")
                 self._flush_batch(snapshots, updates)
                 snapshots = []
                 updates = []
         
         # Flush final
         if snapshots or updates:
+            print(f"\n   💾 Flush final: {len(snapshots)} snapshots, {len(updates)} updates")
             self._flush_batch(snapshots, updates)
         
         print(f"\n✅ {processed} itens processados!")
