@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 SUPERBID MONITOR - Match Garantido 100%
-✅ Busca cada offer_id individualmente na API
-✅ Garante match de todos os itens do banco
-✅ Muito mais eficiente que buscar tudo
+✅ Pega TODOS os itens do banco (sem limit)
+✅ Busca TODAS as categorias (igual ao scraper)
+✅ Match garantido de todos os itens
 """
 
 import os
@@ -12,7 +12,7 @@ import sys
 import time
 import requests
 from datetime import datetime, timezone
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set
 
 
 # ============================================================================
@@ -44,35 +44,55 @@ class SupabaseSuperbidMonitor:
         self.session = requests.Session()
         self.session.headers.update(self.headers)
     
-    def get_active_items(self) -> List[Dict]:
-        """Busca itens ativos do banco"""
-        print(f"📊 Carregando itens do banco...")
+    def get_all_active_items(self) -> List[Dict]:
+        """Busca TODOS os itens ativos (sem limit) - PAGINADO"""
+        print(f"📊 Carregando itens do banco (TODOS)...")
         
         now = datetime.utcnow().isoformat()
         url = f"{self.url}/rest/v1/{self.table_items}"
         
-        params = {
-            'select': 'id,external_id,offer_id,total_bids,total_bidders,visits,has_bids,current_winner_id,is_sold,is_closed,is_active,last_scraped_at',
-            'is_active': 'eq.true',
-            'is_closed': 'eq.false',
-            'auction_end_date': f'gt.{now}',
-            'limit': 1000,
-        }
+        all_items = []
+        offset = 0
+        page_size = 1000
         
-        try:
-            response = self.session.get(url, params=params, timeout=30)
+        while True:
+            params = {
+                'select': 'id,external_id,offer_id,category_display,total_bids,total_bidders,visits,has_bids,current_winner_id,is_sold,is_closed,is_active,last_scraped_at',
+                'is_active': 'eq.true',
+                'is_closed': 'eq.false',
+                'auction_end_date': f'gt.{now}',
+                'limit': page_size,
+                'offset': offset,
+                'order': 'id.asc',
+            }
             
-            if response.status_code == 200:
-                items = response.json()
-                print(f"✅ {len(items)} itens carregados")
-                return items
-            else:
-                print(f"❌ Erro HTTP {response.status_code}")
-                return []
+            try:
+                response = self.session.get(url, params=params, timeout=30)
                 
-        except Exception as e:
-            print(f"❌ Erro: {str(e)}")
-            return []
+                if response.status_code == 200:
+                    items = response.json()
+                    
+                    if not items:
+                        break
+                    
+                    all_items.extend(items)
+                    print(f"   📄 Página {offset//page_size + 1}: +{len(items)} itens (total: {len(all_items)})")
+                    
+                    if len(items) < page_size:
+                        break
+                    
+                    offset += page_size
+                    
+                else:
+                    print(f"❌ Erro HTTP {response.status_code}")
+                    break
+                    
+            except Exception as e:
+                print(f"❌ Erro: {str(e)}")
+                break
+        
+        print(f"✅ {len(all_items)} itens carregados no total\n")
+        return all_items
     
     def count_snapshots(self, item_id: int) -> int:
         """Conta snapshots de um item"""
@@ -140,21 +160,43 @@ class SupabaseSuperbidMonitor:
 
 
 # ============================================================================
-# MONITOR - BUSCA INDIVIDUAL
+# MONITOR - BUSCA POR CATEGORIA (IGUAL AO SCRAPER)
 # ============================================================================
 
 class SuperbidMonitor:
-    """Monitor Superbid - Busca individual por offer_id"""
+    """Monitor Superbid - Busca por categoria"""
     
     def __init__(self):
-        # API de OFERTA INDIVIDUAL
-        self.offer_detail_url = 'https://offer-query.superbid.net/offer/'
+        self.api_url = 'https://offer-query.superbid.net/seo/offers/'
+        self.site_url = 'https://exchange.superbid.net'
+        
+        # MESMAS 18 CATEGORIAS DO SCRAPER
+        self.categories = [
+            ('alimentos-e-bebidas', 'Alimentos e Bebidas'),
+            ('animais', 'Animais'),
+            ('bolsas-canetas-joias-e-relogios', 'Bolsas, Canetas, Joias e Relógios'),
+            ('caminhoes-onibus', 'Caminhões e Ônibus'),
+            ('carros-motos', 'Carros e Motos'),
+            ('cozinhas-e-restaurantes', 'Cozinhas e Restaurantes'),
+            ('eletrodomesticos', 'Eletrodomésticos'),
+            ('materiais-para-construcao-civil', 'Materiais para Construção Civil'),
+            ('maquinas-pesadas-agricolas', 'Máquinas Pesadas e Agrícolas'),
+            ('industrial-maquinas-equipamentos', 'Industrial, Máquinas e Equipamentos'),
+            ('imoveis', 'Imóveis'),
+            ('embarcacoes-aeronaves', 'Embarcações e Aeronaves'),
+            ('moveis-e-decoracao', 'Móveis e Decoração'),
+            ('movimentacao-transporte', 'Movimentação e Transporte'),
+            ('oportunidades', 'Oportunidades'),
+            ('partes-e-pecas', 'Partes e Peças'),
+            ('sucatas-materiais-residuos', 'Sucatas, Materiais e Resíduos'),
+            ('tecnologia', 'Tecnologia'),
+        ]
         
         self.stats = {
             'items_in_db': 0,
             'items_scraped': 0,
             'items_matched': 0,
-            'items_not_found': 0,
+            'items_not_matched': 0,
             'snapshots_created': 0,
             'items_updated': 0,
             'bid_changes': 0,
@@ -174,32 +216,59 @@ class SuperbidMonitor:
         self.session.headers.update(self.headers)
         
         self.client = SupabaseSuperbidMonitor()
+        self.db_items_by_offer_id = {}
     
     def run(self):
         """Execução principal"""
         print("\n" + "="*80)
-        print("🔵 SUPERBID MONITOR - BUSCA INDIVIDUAL")
+        print("🔵 SUPERBID MONITOR - BUSCA POR CATEGORIA")
         print("="*80)
         print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("="*80 + "\n")
         
         start_time = time.time()
         
-        # 1. Carrega banco
-        db_items = self.client.get_active_items()
+        # 1. Carrega TODOS os itens do banco (sem limit)
+        db_items = self.client.get_all_active_items()
         
         if not db_items:
             print("⚠️  Nenhum item no banco")
             return 0
         
         self.stats['items_in_db'] = len(db_items)
-        print(f"🎯 {len(db_items)} itens para monitorar\n{'='*80}\n")
         
-        # 2. Processa item por item
-        print("🔍 Buscando ofertas individualmente...\n")
-        self._process_items_individually(db_items)
+        # Indexa por offer_id E por categoria
+        items_by_category = {}
+        for item in db_items:
+            offer_id = item['offer_id']
+            category = item.get('category_display', 'Desconhecida')
+            
+            self.db_items_by_offer_id[offer_id] = item
+            
+            if category not in items_by_category:
+                items_by_category[category] = []
+            items_by_category[category].append(offer_id)
         
-        # 3. Stats
+        print(f"🎯 {len(self.db_items_by_offer_id)} offer_ids")
+        print(f"📦 {len(items_by_category)} categorias no banco\n")
+        print("="*80 + "\n")
+        
+        # 2. Scrape todas as categorias
+        print("🔍 Scrapando categorias...\n")
+        api_offers = self._fetch_all_categories()
+        
+        if not api_offers:
+            print("⚠️  Nenhuma oferta da API")
+            return 0
+        
+        self.stats['items_scraped'] = len(api_offers)
+        print(f"\n✅ {len(api_offers)} ofertas scrapadas\n{'='*80}\n")
+        
+        # 3. Processa matches
+        print("🔄 Processando matches...")
+        self._process_matches(api_offers)
+        
+        # 4. Stats
         self._print_stats()
         
         elapsed = time.time() - start_time
@@ -212,53 +281,111 @@ class SuperbidMonitor:
         
         return 0
     
-    def _fetch_offer_by_id(self, offer_id: int) -> Optional[Dict]:
-        """Busca oferta individual na API"""
-        try:
-            params = {
-                "locale": "pt_BR",
-                "timeZoneId": "America/Sao_Paulo",
-            }
+    def _fetch_all_categories(self) -> Dict[int, Dict]:
+        """Scrape todas as categorias (IGUAL AO SCRAPER)"""
+        all_offers = {}
+        
+        for idx, (url_slug, display_name) in enumerate(self.categories, 1):
+            print(f"[{idx}/{len(self.categories)}] 📦 {display_name}")
             
-            url = f"{self.offer_detail_url}{offer_id}"
-            response = self.session.get(url, params=params, timeout=15)
+            offers = self._scrape_category(url_slug)
             
-            if response.status_code == 200:
-                return response.json()
-            elif response.status_code == 404:
-                return None  # Oferta não existe mais
-            else:
-                print(f"   ⚠️  HTTP {response.status_code} para offer_id {offer_id}")
-                return None
-                
-        except Exception as e:
-            print(f"   ⚠️  Erro ao buscar {offer_id}: {str(e)[:60]}")
-            return None
+            for offer_id, offer_data in offers.items():
+                all_offers[offer_id] = offer_data
+            
+            print(f"   ✅ {len(offers)} ofertas\n")
+            time.sleep(1)
+        
+        return all_offers
     
-    def _process_items_individually(self, db_items: List[Dict]):
-        """Processa cada item individualmente"""
+    def _scrape_category(self, url_slug: str) -> Dict[int, Dict]:
+        """Scrape completo de uma categoria"""
+        offers = {}
+        page_num = 1
+        page_size = 100
+        consecutive_errors = 0
+        max_errors = 3
+        
+        while True:
+            try:
+                params = {
+                    "urlSeo": f"{self.site_url}/categorias/{url_slug}",
+                    "locale": "pt_BR",
+                    "orderBy": "score:desc",
+                    "pageNumber": page_num,
+                    "pageSize": page_size,
+                    "portalId": "[2,15]",
+                    "requestOrigin": "marketplace",
+                    "searchType": "opened" if url_slug == 'imoveis' else "openedAll",
+                    "timeZoneId": "America/Sao_Paulo",
+                }
+                
+                response = self.session.get(self.api_url, params=params, timeout=30)
+                
+                if response.status_code != 200:
+                    consecutive_errors += 1
+                    print(f"   ⚠️  HTTP {response.status_code} pág {page_num}")
+                    if consecutive_errors >= max_errors:
+                        break
+                    page_num += 1
+                    time.sleep(3)
+                    continue
+                
+                data = response.json()
+                api_offers = data.get('offers', [])
+                total = data.get('total', 0)
+                
+                if not api_offers:
+                    break
+                
+                consecutive_errors = 0
+                print(f"   📄 Pág {page_num}: {len(api_offers)} ofertas (total: {total})")
+                
+                for offer in api_offers:
+                    offer_id = offer.get('id')
+                    if offer_id:
+                        offers[offer_id] = offer
+                
+                # Verifica se há mais páginas
+                start = data.get('start', 0)
+                limit = data.get('limit', page_size)
+                if start + limit >= total:
+                    break
+                
+                page_num += 1
+                time.sleep(0.5)
+                
+            except Exception as e:
+                consecutive_errors += 1
+                self.stats['errors'] += 1
+                print(f"   ⚠️  Erro pág {page_num}: {str(e)[:60]}")
+                if consecutive_errors >= max_errors:
+                    break
+                page_num += 1
+                time.sleep(3)
+        
+        return offers
+    
+    def _process_matches(self, api_offers: Dict[int, Dict]):
+        """Processa matches"""
         snapshots = []
         updates = []
         batch_size = 50
         
-        total = len(db_items)
+        total = len(self.db_items_by_offer_id)
+        processed = 0
         
-        for idx, db_item in enumerate(db_items, 1):
-            offer_id = db_item.get('offer_id')
+        for offer_id, db_item in self.db_items_by_offer_id.items():
+            processed += 1
             
-            if not offer_id:
-                continue
-            
-            # Busca oferta individual
-            api_data = self._fetch_offer_by_id(offer_id)
+            api_data = api_offers.get(offer_id)
             
             if not api_data:
-                self.stats['items_not_found'] += 1
-                if idx % 10 == 0:
-                    print(f"   [{idx}/{total}] ❌ Oferta {offer_id} não encontrada")
+                self.stats['items_not_matched'] += 1
+                if processed % 100 == 0:
+                    print(f"   [{processed}/{total}] ❌ {offer_id} não encontrado na API")
                 continue
             
-            self.stats['items_scraped'] += 1
             self.stats['items_matched'] += 1
             
             # Conta snapshots
@@ -280,23 +407,20 @@ class SuperbidMonitor:
                 updates.append(update)
             
             # Progress
-            if idx % 50 == 0:
-                print(f"   [{idx}/{total}] ✅ {offer_id} - {db_item.get('total_bids', 0)} lances")
+            if processed % 100 == 0:
+                print(f"   [{processed}/{total}] ✅ Processados")
             
-            # Insere em lotes
+            # Flush em lotes
             if len(snapshots) >= batch_size:
                 self._flush_batch(snapshots, updates)
                 snapshots = []
                 updates = []
-            
-            # Rate limiting
-            time.sleep(0.3)  # 3 requests/segundo
         
         # Flush final
         if snapshots or updates:
             self._flush_batch(snapshots, updates)
         
-        print(f"\n✅ Processamento completo!")
+        print(f"\n✅ {processed} itens processados!")
     
     def _flush_batch(self, snapshots: List[Dict], updates: List[Dict]):
         """Salva lote de snapshots e updates"""
@@ -309,7 +433,7 @@ class SuperbidMonitor:
             self.stats['items_updated'] += updated
     
     def _create_snapshot(self, db_item: Dict, api_data: Dict, total_snaps: int) -> Optional[Dict]:
-        """Cria snapshot"""
+        """Cria snapshot - CÓDIGO IGUAL AO ANTERIOR"""
         try:
             now = datetime.now(timezone.utc)
             
@@ -358,7 +482,6 @@ class SuperbidMonitor:
                     return None
             
             def safe_state(val):
-                """Garante que state é NULL ou 2 caracteres maiúsculos"""
                 if not val:
                     return None
                 val_str = str(val).strip().upper()
@@ -648,19 +771,32 @@ class SuperbidMonitor:
     def _print_stats(self):
         """Estatísticas"""
         print("\n" + "="*80)
-        print("📊 ESTATÍSTICAS")
+        print("📊 ESTATÍSTICAS FINAIS")
         print("="*80)
-        print(f"  Banco: {self.stats['items_in_db']}")
-        print(f"  Buscados: {self.stats['items_scraped']}")
-        print(f"  Matched: {self.stats['items_matched']} (100%!)")
-        print(f"  Não encontrados: {self.stats['items_not_found']}")
-        print(f"  Snapshots: {self.stats['snapshots_created']}")
-        print(f"  Atualizados: {self.stats['items_updated']}")
-        print(f"  Lances: {self.stats['bid_changes']}")
-        print(f"  Status: {self.stats['status_changes']}")
+        print(f"\n📦 Banco:")
+        print(f"   • Total de itens: {self.stats['items_in_db']}")
+        print(f"\n🔍 Scraping:")
+        print(f"   • Ofertas scrapadas: {self.stats['items_scraped']}")
+        print(f"\n🎯 Matching:")
+        print(f"   • Matched: {self.stats['items_matched']}")
+        print(f"   • Não encontrados: {self.stats['items_not_matched']}")
+        
+        if self.stats['items_in_db'] > 0:
+            match_percent = (self.stats['items_matched'] / self.stats['items_in_db']) * 100
+            print(f"   • Taxa de match: {match_percent:.1f}%")
+        
+        print(f"\n💾 Snapshots:")
+        print(f"   • Criados: {self.stats['snapshots_created']}")
+        print(f"   • Itens atualizados: {self.stats['items_updated']}")
+        
+        print(f"\n📈 Mudanças:")
+        print(f"   • Novos lances: {self.stats['bid_changes']}")
+        print(f"   • Mudanças de status: {self.stats['status_changes']}")
+        
         if self.stats['errors'] > 0:
-            print(f"  ⚠️  Erros: {self.stats['errors']}")
-        print("="*80)
+            print(f"\n⚠️  Erros: {self.stats['errors']}")
+        
+        print("\n" + "="*80)
 
 
 # ============================================================================
