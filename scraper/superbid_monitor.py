@@ -55,9 +55,9 @@ class SupabaseSuperbidMonitor:
         page_size = 1000
         
         while True:
-            # SEM FILTRO DE DATA - pega tudo que está ativo
+            # Query simples - só campos que existem
             params = {
-                'select': 'id,external_id,offer_id,category_display,total_bids,total_bidders,visits,has_bids,current_winner_id,is_sold,is_closed,is_active,last_scraped_at',
+                'select': 'id,external_id,offer_id,category,total_bids,total_bidders,visits,has_bids,current_winner_id,is_sold,is_closed,is_active,last_scraped_at',
                 'is_active': 'eq.true',
                 'is_closed': 'eq.false',
                 'limit': page_size,
@@ -240,7 +240,7 @@ class SuperbidMonitor:
         items_by_category = {}
         for item in db_items:
             offer_id = item['offer_id']
-            category = item.get('category_display', 'Desconhecida')
+            category = item.get('category', 'Desconhecida')  # ← MUDOU: era category_display
             
             self.db_items_by_offer_id[offer_id] = item
             
