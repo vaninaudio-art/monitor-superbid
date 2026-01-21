@@ -48,7 +48,6 @@ class SupabaseSuperbidMonitor:
         """Busca TODOS os itens ativos (sem limit) - PAGINADO"""
         print(f"📊 Carregando itens do banco (TODOS)...")
         
-        now = datetime.utcnow().isoformat()
         url = f"{self.url}/rest/v1/{self.table_items}"
         
         all_items = []
@@ -56,11 +55,11 @@ class SupabaseSuperbidMonitor:
         page_size = 1000
         
         while True:
+            # SEM FILTRO DE DATA - pega tudo que está ativo
             params = {
                 'select': 'id,external_id,offer_id,category_display,total_bids,total_bidders,visits,has_bids,current_winner_id,is_sold,is_closed,is_active,last_scraped_at',
                 'is_active': 'eq.true',
                 'is_closed': 'eq.false',
-                'auction_end_date': f'gt.{now}',
                 'limit': page_size,
                 'offset': offset,
                 'order': 'id.asc',
